@@ -1,192 +1,187 @@
 <template>
-  <div>
-    <div id="search" class="o-container o-section u-margin-bottom-10">
-      <tipi-header
-        :title="'Buscar'"
-        :subtitle="'Bucea en la actividad parlamentaria relacionada con los ODS con las múltiples opciones que te ofrece el buscador de Parlamento 2030'"
-      />
+  <div class="scanner-container">
+    <header class="scanner-header">
+      <h1>RSI-Scanner (IHR-LatAm)</h1>
+      <p>
+        Analice documentos legales en formato PDF para detectar su relación con el
+        Reglamento Sanitario Internacional (2005).
+      </p>
+    </header>
 
-      <search-form v-model:formData="formData" @getResults="getResults" />
-
-      <div class="o-grid o-grid--align-center u-margin-bottom-4" id="results">
-        <div class="o-grid__col o-grid__col--fill">
-          <h4 v-if="query_meta.page">{{ message.message }}</h4>
-          <tipi-message
-            v-if="initiatives.length > 0 && !canDownloadCSV"
-            icon
-            type="info"
-            >Se ha superado el número máximo de datos para
-            descargar</tipi-message
-          >
+    <main class="scanner-main">
+      <div class="scanner-controls card">
+        <div class="control-group">
+          <label for="country-select">País del Documento:</label>
+          <select id="country-select" v-model="selectedCountry">
+            <option disabled value="">Seleccione un país</option>
+            <option v-for="country in countries" :key="country.code" :value="country.code">
+              {{ country.name }}
+            </option>
+          </select>
         </div>
-        <div class="o-grid__col o-grid__col--right">
-          <tipi-csv-download
-            :initiatives="initiatives || []"
-            :csvItems="csvItems"
-            :canDownloadCSV="canDownloadCSV"
-            @loadCSVItems="loadCSVItems"
+
+        <div class="control-group">
+          <label for="file-upload">Subir Documento (PDF):</label>
+          <input
+            type="file"
+            id="file-upload"
+            @change="handleFileChange"
+            accept=".pdf"
+            :disabled="!selectedCountry"
           />
-          <SaveAlert
-            :searchParams="formData"
-            v-show="alertsIsEnabled() && query_meta.page"
-          />
+        </div>
+
+        <button @click="analyzeDocument" :disabled="!isAnalyzable">
+          Analizar Documento
+        </button>
+      </div>
+
+      <div v-if="isLoading" class="loading-indicator">
+        <p>Procesando documento... por favor espere.</p>
+      </div>
+
+      <div v-if="error" class="error-message card">
+        <p><strong>Error:</strong> {{ error }}</p>
+      </div>
+
+      <div v-if="analysisResult" class="results-container card">
+        <h2>Resultados del Análisis</h2>
+        <div class="result-section">
+          <h3>Temas RSI Detectados</h3>
+          <ul>
+            <li v-for="tag in analysisResult.tags" :key="tag.label">
+              <strong>{{ tag.label }}</strong> (Relevancia: {{ (tag.score * 100).toFixed(2) }}%)
+            </li>
+          </ul>
+           <div v-if="!analysisResult.tags || analysisResult.tags.length === 0">
+            <p>No se detectaron temas RSI específicos en el texto proporcionado.</p>
+          </div>
         </div>
       </div>
-      <tipi-results
-        :loadingResults="loadingResults"
-        :initiatives="initiatives || []"
-        :topicsStyles="topicsStyles"
-        :queryMeta="query_meta"
-        @loadMore="loadMore"
-      />
-    </div>
+    </main>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onUpdated, onMounted } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
-import qs from 'qs';
-import VueScrollTo from 'vue-scrollto';
-import {
-  TipiHeader,
-  TipiCsvDownload,
-  TipiMessage,
-  TipiResults,
-} from '@politicalwatch/tipi-uikit';
+import { ref, computed } from 'vue';
+import { useRsiStore } from '@/stores/rsi';
+import countryConfig from '@/config/countries';
 
-import api from '@/api';
-import config from '@/config';
-import SearchForm from '@/components/SearchForm.vue';
-import SaveAlert from '@/components/SaveAlert.vue';
+const rsiStore = useRsiStore();
 
-const route = useRoute();
-const router = useRouter();
+const selectedFile = ref(null);
+const selectedCountry = ref('');
+const countries = ref(countryConfig);
+const analysisResult = ref(null);
 
-const LIMITCSV = 1000;
-const topicsStyles = config.STYLES.topics;
+const isLoading = computed(() => rsiStore.isLoading);
+const error = computed(() => rsiStore.error);
+const isAnalyzable = computed(() => selectedFile.value && selectedCountry.value);
 
-const errors = ref(null);
-const initiatives = ref([]);
-const query_meta = ref({});
-const formData = ref({
-  topic: '',
-  author: '',
-  deputy: '',
-  startdate: '',
-  enddate: '',
-  place: '',
-  reference: '',
-  page: 1,
-  tags: [],
-  subtopics: [],
-});
-const loadingResults = ref(false);
-const csvItems = ref([]);
-const scrollToID = ref('#results');
-
-const canDownloadCSV = computed(() => query_meta.value.total < LIMITCSV);
-
-const message = computed(() => {
-  if (errors.value) {
-    return { icon: true, type: 'error', message: errors.value };
+const handleFileChange = (event) => {
+  const file = event.target.files[0];
+  if (file && file.type === 'application/pdf') {
+    selectedFile.value = file;
+    analysisResult.value = null; // Reset previous results
+    rsiStore.error = null; // Reset previous errors
+  } else {
+    rsiStore.error = 'Por favor, seleccione un archivo PDF válido.';
+    selectedFile.value = null;
   }
-  if (query_meta.value.total) {
-    return {
-      icon: true,
-      type: 'success',
-      message: `Se han encontrado ${query_meta.value.total} iniciativas`,
-    };
-  }
-  return {
-    icon: true,
-    type: 'error',
-    message: `No se han encontrado iniciativas que cumplan los criterios`,
-  };
-});
-
-const loadMore = () => {
-  let node = document.querySelectorAll('.c-initiative-card');
-  node = node[node.length - 1];
-  scrollToID.value = `#${node.id}`;
-  formData.value.page++;
-  getResults();
 };
 
-const alertsIsEnabled = () => config.USE_ALERTS === 'true';
-
-const loadCSVItems = (event) => {
-  if (!canDownloadCSV.value) return false;
-  event.target.innerText = 'Procesando descarga...';
-  let params = Object.assign({ per_page: LIMITCSV }, formData.value);
-  api
-    .getInitiatives(params)
-    .then((response) => {
-      csvItems.value = response.initiatives.map((initiative) => ({
-        ...initiative,
-        topics: initiative.tagged[0].topics.join(', '),
-        tags: initiative.tagged[0].tags.map((tag) => tag.tag).join(', '),
-      }));
-      event.target.innerText = 'Descarga los datos';
-    })
-    .catch((error) => (errors.value = error));
+const analyzeDocument = async () => {
+  if (!isAnalyzable.value) {
+    rsiStore.error = 'Por favor, seleccione un país y un archivo para analizar.';
+    return;
+  }
+  analysisResult.value = null;
+  const result = await rsiStore.processDocument(selectedFile.value, selectedCountry.value);
+  if (result) {
+    analysisResult.value = result;
+  }
 };
-
-const getResults = (event) => {
-  loadingResults.value = true;
-  csvItems.value = [];
-  const isNewSearch = event?.type === 'submit';
-  const params =
-    route.params.data && !isNewSearch
-      ? qs.parse(route.params.data)
-      : formData.value;
-  formData.value = Object.assign(formData.value, params);
-  const urlParams = Object.assign({}, formData.value);
-
-  if (isNewSearch) {
-    scrollToID.value = '#results';
-    event.preventDefault();
-  }
-
-  Object.keys(urlParams).forEach(
-    (key) => (!urlParams[key] || key === 'page') && delete urlParams[key]
-  );
-
-  router
-    .push({
-      name: 'results',
-      params: {
-        data: qs.stringify(urlParams, { arrayFormat: 'repeat' }),
-      },
-    })
-    .catch((e) => e);
-
-  api
-    .getInitiatives(formData.value)
-    .then((response) => {
-      if (!isNewSearch) {
-        initiatives.value.push.apply(initiatives.value, response.initiatives);
-      } else {
-        initiatives.value = response.initiatives;
-      }
-      query_meta.value = response.query_meta;
-      loadingResults.value = false;
-      nextTick().then(() => {
-        VueScrollTo.scrollTo(scrollToID.value, 1500);
-      });
-    })
-    .catch((error) => (errors.value = error));
-};
-
-onMounted(() => {
-  if (route.name == 'results') {
-    getResults();
-  }
-});
-
-onUpdated(() => {
-  if (document.getElementById('downloadCSV')) {
-    document.getElementById('downloadCSV').click();
-  }
-});
 </script>
+
+<style scoped>
+.scanner-container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 2rem;
+  font-family: sans-serif;
+}
+
+.scanner-header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.scanner-header h1 {
+  color: #0053a0; /* WHO Blue */
+}
+
+.card {
+  background: #f9f9f9;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.scanner-controls .control-group {
+  margin-bottom: 1rem;
+}
+
+.scanner-controls label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: bold;
+}
+
+.scanner-controls select,
+.scanner-controls input[type='file'] {
+  width: 100%;
+  padding: 0.5rem;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+}
+
+.scanner-controls button {
+  width: 100%;
+  padding: 0.75rem;
+  background-color: #0053a0;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.scanner-controls button:disabled {
+  background-color: #a0a0a0;
+  cursor: not-allowed;
+}
+
+.loading-indicator,
+.error-message {
+  text-align: center;
+}
+
+.error-message {
+  color: #d32f2f;
+  background-color: #ffebee;
+  border-color: #d32f2f;
+}
+
+.results-container h2 {
+  border-bottom: 2px solid #eee;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.result-section ul {
+  list-style-type: none;
+  padding: 0;
+}
+</style>
